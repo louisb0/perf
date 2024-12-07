@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <sys/resource.h>
 #include <vector>
 #include <x86intrin.h>
 
@@ -45,6 +47,18 @@ namespace convert {
         return (bytes / seconds) / (1024.0 * 1024.0 * 1024.0);
     }
 } // namespace convert
+
+namespace counters {
+    inline u64 soft_page_faults() {
+        struct rusage usage;
+        if (getrusage(RUSAGE_SELF, &usage) != 0) {
+            std::cerr << "ERROR: counters::soft_page_faults(): " << strerror(errno) << "\n";
+            return 0;
+        }
+
+        return usage.ru_minflt;
+    }
+} // namespace counters
 
 namespace profiler {
     struct profile_anchor {
@@ -188,6 +202,7 @@ namespace profiler {
 
 } // namespace profiler
 
+// TODO(louis): rewrite this. super clunky, not a fan at all
 namespace repetition {
     enum class state {
         uninitialised,
@@ -196,15 +211,38 @@ namespace repetition {
         error,
     };
 
-    struct results {
-        u64 test_count = 0;
-        u64 total_time = 0;
-        u64 max_time = 0;
-        u64 min_time = ~0ull;
+    enum metric {
+        test_count,
+        cpu_timer,
+        page_faults,
+        byte_count,
+
+        num_metrics,
     };
+
+    struct metric_values {
+        u64 values[metric::num_metrics] = {};
+    };
+
+    struct results {
+        metric_values total;
+        metric_values min;
+        metric_values max;
+    };
+
+    using metric_reader = u64 (*)();
 
     class tester {
     public:
+        tester() {
+            m_readers[metric::cpu_timer] = time::read_cpu_timer;
+            m_readers[metric::page_faults] = counters::soft_page_faults;
+
+            for (int i = 0; i < metric::num_metrics; i++) {
+                m_results.min.values[i] = ~0ull;
+            }
+        }
+
         void start_test_wave(u64 target_processed_byte_count, u32 seconds_to_try) {
             if (m_state == state::uninitialised) {
                 m_state = state::testing;
@@ -223,15 +261,25 @@ namespace repetition {
 
         void begin_time() {
             m_open_block_count++;
-            m_time_accumulated_on_this_test -= time::read_cpu_timer();
+
+            for (int i = 0; i < metric::num_metrics; i++) {
+                if (m_readers[i]) {
+                    m_current.values[i] -= m_readers[i]();
+                }
+            }
         }
 
         void end_time() {
+            for (int i = 0; i < metric::num_metrics; i++) {
+                if (m_readers[i]) {
+                    m_current.values[i] += m_readers[i]();
+                }
+            }
+
             m_close_block_count++;
-            m_time_accumulated_on_this_test += time::read_cpu_timer();
         }
 
-        void count_bytes(u64 byte_count) { m_bytes_accumulated_on_this_test += byte_count; }
+        void count_bytes(u64 byte_count) { m_current.values[metric::byte_count] += byte_count; }
 
         bool is_testing() {
             if (m_state != state::testing) {
@@ -246,33 +294,36 @@ namespace repetition {
                     return false;
                 }
 
-                if (m_bytes_accumulated_on_this_test != m_target_byte_count &&
+                if (m_current.values[metric::byte_count] != m_target_byte_count &&
                     m_target_byte_count != 0) {
-                    error("mismatch between accumulated and target processed byte count.");
+                    error("mismatch between accumulated and target processed byte count");
                 }
 
                 if (m_state == state::testing) {
-                    u64 elapsed = m_time_accumulated_on_this_test;
+                    m_current.values[metric::test_count] = 1;
 
-                    m_results.test_count++;
-                    m_results.total_time += elapsed;
-                    m_results.max_time = std::max(m_results.max_time, elapsed);
+                    for (int i = 0; i < metric::num_metrics; i++) {
+                        m_results.total.values[i] += m_current.values[i];
+                        m_results.max.values[i] =
+                            std::max(m_results.max.values[i], m_current.values[i]);
+                        m_results.min.values[i] =
+                            std::min(m_results.min.values[i], m_current.values[i]);
+                    }
 
-                    if (elapsed < m_results.min_time) {
-                        m_results.min_time = elapsed;
+                    if (m_current.values[metric::cpu_timer] ==
+                        m_results.min.values[metric::cpu_timer]) {
                         m_tests_started_at = current_time;
                     }
 
                     m_open_block_count = 0;
                     m_close_block_count = 0;
-                    m_time_accumulated_on_this_test = 0;
-                    m_bytes_accumulated_on_this_test = 0;
+                    m_current = {};
                 }
+            }
 
-                if ((current_time - m_tests_started_at) >= m_try_for_time) {
-                    m_state = state::completed;
-                    print_results();
-                }
+            if ((current_time - m_tests_started_at) >= m_try_for_time) {
+                m_state = state::completed;
+                print_results();
             }
 
             return m_state == state::testing;
@@ -286,27 +337,46 @@ namespace repetition {
             m_state = state::error;
         }
 
-        void print_time(const char *label, u64 cpu_time, u64 byte_count) {
-            double seconds = convert::ticks_to_seconds(cpu_time, time::estimate_cpu_timer_freq());
+        void print_metric_value(const char *label, metric_values value) {
+            double seconds = convert::ticks_to_seconds(value.values[metric::cpu_timer],
+                                                       time::estimate_cpu_timer_freq());
 
             std::cout << label << ": " << std::fixed << std::setprecision(6) << (1000.0 * seconds)
                       << "ms";
 
-            if (byte_count > 0) {
+            if (value.values[metric::byte_count] > 0) {
                 std::cout << " " << std::setprecision(6)
-                          << convert::bytes_per_sec_to_gbps(byte_count, seconds) << "GB/s";
+                          << convert::bytes_per_sec_to_gbps(value.values[metric::byte_count],
+                                                            seconds)
+                          << "GB/s";
+            }
+
+            if (value.values[metric::page_faults] > 0) {
+                std::cout << " PF: " << std::setprecision(4)
+                          << (double)value.values[metric::page_faults];
+
+                if (value.values[metric::byte_count] > 0) {
+                    std::cout << " (" << std::setprecision(4)
+                              << (double)value.values[metric::byte_count] /
+                                     (value.values[metric::page_faults] * 1024.0)
+                              << "k/fault)";
+                }
             }
         }
 
         void print_results() {
             std::cout << "\n";
-            print_time("min", m_results.min_time, m_target_byte_count);
+            print_metric_value("min", m_results.min);
             std::cout << "\n";
-            print_time("max", m_results.max_time, m_target_byte_count);
+            print_metric_value("max", m_results.max);
             std::cout << "\n";
 
-            if (m_results.test_count > 0) {
-                print_time("avg", m_results.total_time / m_results.test_count, m_target_byte_count);
+            if (m_results.total.values[metric::test_count] > 0) {
+                metric_values avg = m_results.total;
+                for (int i = 0; i < metric::num_metrics; i++) {
+                    avg.values[i] /= m_results.total.values[metric::test_count];
+                }
+                print_metric_value("avg", avg);
                 std::cout << "\n";
             }
         }
@@ -317,11 +387,11 @@ namespace repetition {
         u64 m_try_for_time = 0;
         u64 m_tests_started_at = 0;
 
-        u64 m_open_block_count = 0;
-        u64 m_close_block_count = 0;
-        u64 m_time_accumulated_on_this_test = 0;
-        u64 m_bytes_accumulated_on_this_test = 0;
+        u32 m_open_block_count = 0;
+        u32 m_close_block_count = 0;
 
+        metric_reader m_readers[metric::num_metrics] = {};
+        metric_values m_current = {};
         results m_results = {};
     };
 
