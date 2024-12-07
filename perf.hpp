@@ -18,15 +18,15 @@ namespace time {
 
     inline u64 estimate_cpu_timer_freq() {
         constexpr auto MEASUREMENT_PERIOD = std::chrono::milliseconds(100);
-        constexpr uint64_t MICROSECONDS_PER_SECOND = 1'000'000ULL;
+        constexpr u64 MICROSECONDS_PER_SECOND = 1'000'000ULL;
 
-        uint64_t cpu_start = __rdtsc();
+        u64 cpu_start = __rdtsc();
         auto os_start = std::chrono::steady_clock::now();
 
         while (std::chrono::steady_clock::now() - os_start < MEASUREMENT_PERIOD) {
         }
 
-        uint64_t cpu_ticks = __rdtsc() - cpu_start;
+        u64 cpu_ticks = __rdtsc() - cpu_start;
         auto os_duration = std::chrono::steady_clock::now() - os_start;
         auto microseconds =
             std::chrono::duration_cast<std::chrono::microseconds>(os_duration).count();
