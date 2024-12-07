@@ -36,6 +36,16 @@ namespace time {
 
 } // namespace time
 
+namespace convert {
+    inline double ticks_to_seconds(u64 ticks, u64 freq) { return static_cast<double>(ticks) / freq; }
+
+    inline double ticks_to_ms(u64 ticks, u64 freq) { return ticks_to_seconds(ticks, freq) * 1000.0; }
+
+    inline double bytes_per_sec_to_gbps(u64 bytes, double seconds) {
+        return (bytes / seconds) / (1024.0 * 1024.0 * 1024.0);
+    }
+} // namespace convert
+
 namespace profiler {
     struct profile_anchor {
         const char *name = nullptr;
@@ -101,11 +111,12 @@ namespace profiler {
 
     inline void end_and_print_profile() {
         global_profiler.end_tsc = time::read_cpu_timer();
+
         u64 cpu_freq = time::estimate_cpu_timer_freq();
         u64 cpu_elapsed = global_profiler.end_tsc - global_profiler.start_tsc;
 
-        std::cout << "\nTotal time: " << 1000.0 * cpu_elapsed / cpu_freq << "ms (CPU freq "
-                  << cpu_freq << ")\n\n";
+        std::cout << "\nTotal time: " << convert::ticks_to_ms(cpu_elapsed, cpu_freq)
+                  << "ms (CPU freq " << cpu_freq << ")\n\n";
 
         std::vector<size_t> anchor_indices;
         for (size_t i = 0; i < 4096; ++i) {
@@ -124,28 +135,28 @@ namespace profiler {
                   << std::setw(12) << "Time(ms)" 
                   << std::setw(12) << "Self(%)" 
                   << std::setw(12) << "Total(%)"
-                  << std::setw(12) << "Gbps"
+                  << std::setw(12) << "GB/s"
                   << '\n'
                   << std::string(76, '-') << '\n';
         // clang-format on
 
         for (size_t idx : anchor_indices) {
             const auto &anchor = anchors[idx];
-            double seconds = anchor.tsc_elapsed_exclusive / static_cast<double>(cpu_freq);
-            double ms = 1000.0 * seconds;
+
+            double seconds = convert::ticks_to_seconds(anchor.tsc_elapsed_exclusive, cpu_freq);
             double self_percent = 100.0 * anchor.tsc_elapsed_exclusive / cpu_elapsed;
             double total_percent = 100.0 * anchor.tsc_elapsed_inclusive / cpu_elapsed;
 
             double throughput = 0.0;
             if (seconds > 0 && anchor.processed_byte_count > 0) {
-                throughput = (anchor.processed_byte_count / seconds) * (8.0 / (1024 * 1024 * 1024));
+                throughput = convert::bytes_per_sec_to_gbps(anchor.processed_byte_count, seconds);
             }
 
             // clang-format off
             std::cout << std::left << std::setw(20) << anchor.name 
                       << std::right << std::setw(8) << anchor.hits 
                       << std::fixed << std::setprecision(4) 
-                      << std::setw(12) << ms
+                      << std::setw(12) << 1000 * seconds
                       << std::setw(11) << self_percent << '%'
                       << std::setw(12)
                       << (anchor.tsc_elapsed_inclusive != anchor.tsc_elapsed_exclusive
@@ -176,5 +187,144 @@ namespace profiler {
 #define PROFILE_FUNCTION() PROFILE_BLOCK(__func__)
 
 } // namespace profiler
+
+namespace repetition {
+    enum class state {
+        uninitialised,
+        testing,
+        completed,
+        error,
+    };
+
+    struct results {
+        u64 test_count = 0;
+        u64 total_time = 0;
+        u64 max_time = 0;
+        u64 min_time = ~0ull;
+    };
+
+    class tester {
+    public:
+        void start_test_wave(u64 target_processed_byte_count, u32 seconds_to_try) {
+            if (m_state == state::uninitialised) {
+                m_state = state::testing;
+                m_target_byte_count = target_processed_byte_count;
+            } else if (m_state == state::completed) {
+                m_state = state::testing;
+
+                if (target_processed_byte_count != m_target_byte_count) {
+                    error("target_processed_byte_count changed between waves");
+                }
+            }
+
+            m_try_for_time = time::estimate_cpu_timer_freq() * seconds_to_try;
+            m_tests_started_at = time::read_cpu_timer();
+        }
+
+        void begin_time() {
+            m_open_block_count++;
+            m_time_accumulated_on_this_test -= time::read_cpu_timer();
+        }
+
+        void end_time() {
+            m_close_block_count++;
+            m_time_accumulated_on_this_test += time::read_cpu_timer();
+        }
+
+        void count_bytes(u64 byte_count) { m_bytes_accumulated_on_this_test += byte_count; }
+
+        bool is_testing() {
+            if (m_state != state::testing) {
+                return false;
+            }
+
+            u64 current_time = time::read_cpu_timer();
+
+            if (m_open_block_count) {
+                if (m_open_block_count != m_close_block_count) {
+                    error("imbalanced begin_time() and end_time()");
+                    return false;
+                }
+
+                if (m_bytes_accumulated_on_this_test != m_target_byte_count &&
+                    m_target_byte_count != 0) {
+                    error("mismatch between accumulated and target processed byte count.");
+                }
+
+                if (m_state == state::testing) {
+                    u64 elapsed = m_time_accumulated_on_this_test;
+
+                    m_results.test_count++;
+                    m_results.total_time += elapsed;
+                    m_results.max_time = std::max(m_results.max_time, elapsed);
+
+                    if (elapsed < m_results.min_time) {
+                        m_results.min_time = elapsed;
+                        m_tests_started_at = current_time;
+                    }
+
+                    m_open_block_count = 0;
+                    m_close_block_count = 0;
+                    m_time_accumulated_on_this_test = 0;
+                    m_bytes_accumulated_on_this_test = 0;
+                }
+
+                if ((current_time - m_tests_started_at) >= m_try_for_time) {
+                    m_state = state::completed;
+                    print_results();
+                }
+            }
+
+            return m_state == state::testing;
+        }
+
+        const results &get_results() const { return m_results; }
+
+    private:
+        void error(const char *message) {
+            std::cerr << "ERROR: " << message << "\n";
+            m_state = state::error;
+        }
+
+        void print_time(const char *label, u64 cpu_time, u64 byte_count) {
+            double seconds = convert::ticks_to_seconds(cpu_time, time::estimate_cpu_timer_freq());
+
+            std::cout << label << ": " << std::fixed << std::setprecision(6) << (1000.0 * seconds)
+                      << "ms";
+
+            if (byte_count > 0) {
+                std::cout << " " << std::setprecision(6)
+                          << convert::bytes_per_sec_to_gbps(byte_count, seconds) << "GB/s";
+            }
+        }
+
+        void print_results() {
+            std::cout << "\n";
+            print_time("min", m_results.min_time, m_target_byte_count);
+            std::cout << "\n";
+            print_time("max", m_results.max_time, m_target_byte_count);
+            std::cout << "\n";
+
+            if (m_results.test_count > 0) {
+                print_time("avg", m_results.total_time / m_results.test_count, m_target_byte_count);
+                std::cout << "\n";
+            }
+        }
+
+        state m_state = state::uninitialised;
+
+        u64 m_target_byte_count = 0;
+        u64 m_try_for_time = 0;
+        u64 m_tests_started_at = 0;
+
+        u64 m_open_block_count = 0;
+        u64 m_close_block_count = 0;
+        u64 m_time_accumulated_on_this_test = 0;
+        u64 m_bytes_accumulated_on_this_test = 0;
+
+        results m_results = {};
+    };
+
+}; // namespace repetition
 
 } // namespace perf
