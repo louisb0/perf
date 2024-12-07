@@ -5,11 +5,13 @@ A lightweight header-only C++ library for code profiling and performance measure
 ## Profiler Usage
 Track performance metrics of code blocks with automatic scope handling:
 
-`PROFILE_FUNCTION();              // Profile current function`
-`PROFILE_BLOCK("operation");      // Profile arbitrary block`
-`PROFILE_BANDWIDTH("read", size); // Profile with throughput`
+```
+PROFILE_FUNCTION();              // Profile current function
+PROFILE_BLOCK("operation");      // Profile arbitrary block
+PROFILE_BANDWIDTH("read", size); // Profile with throughput
+```
 
-Example:
+See [examples/profiler.cpp](examples/profiler.cpp) for more concrete examples.
 
 ```
 Total time: 57.4838ms (CPU freq 3294364920)
@@ -21,9 +23,10 @@ process_data               1      6.0661    10.5528%           -    0.160986
 run                        1      4.7746     8.3060%  99.988499%           -
 fibonacci              21891      0.7357     1.2799%           -           -
 nested_work                1      0.0054     0.0095%  79.849785%           -
-``````
+```
 
 ## Repetition Tester Usage
+
 Measure best-case performance by repeatedly running operations with warm caches:
 
 ```
@@ -35,7 +38,7 @@ while(tester.is_testing()) {
 }
 ```
 
-Example:
+See [examples/repetition.cpp](examples/repetition.cpp) for more concrete examples.
 
 ```
 Testing file: "../json/examples/data/haversine_p100000_a23008294008.828533.json" (10528071 bytes)
