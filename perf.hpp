@@ -158,6 +158,7 @@ namespace profiler {
         }
     }
 
+    // NOTE(louis): no collision resolution
     constexpr u32 hash(const char *str) {
         u32 hash = 5381;
         while (*str) {
