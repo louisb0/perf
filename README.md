@@ -43,23 +43,29 @@ See [examples/repetition.cpp](examples/repetition.cpp) for more concrete example
 ```
 Testing file: "../json/examples/data/haversine_p100000_a23008294008.828533.json" (10528071 bytes)
 
---- Testing reserved string iterator-based reading ---
-
-min: 349.454461ms 0.028058GB/s
-max: 467.705251ms 0.020964GB/s
-avg: 416.844633ms 0.023522GB/s
-
---- Testing stringstream reading ---
-
-min: 14.470717ms 0.677577GB/s
-max: 26.306175ms 0.372727GB/s
-avg: 19.902128ms 0.492662GB/s
-
 --- Testing direct reading ---
 
-min: 0.969490ms 10.113594GB/s
-max: 6.355256ms 1.542822GB/s
-avg: 1.231268ms 7.963362GB/s
+min: 1.910468ms 5.132267GB/s
+max: 13.461418ms 0.728380GB/s PF: 2572.0000 (3.9974k/fault)
+avg: 2.705943ms 3.623516GB/s
+
+--- Testing direct reading + huge pages ---
+
+min: 1.586541ms 6.180131GB/s PF: 6.0000 (1713.5532k/fault)
+max: 5.727954ms 1.711786GB/s PF: 6.0000 (1713.5532k/fault)
+avg: 2.782507ms 3.523811GB/s PF: 6.0000 (1713.5532k/fault)
+
+--- Testing direct reading + MAP_POPULATE ---
+
+min: 1.106001ms 8.865296GB/s PF: 161.0000 (63.8591k/fault)
+max: 4.070727ms 2.408668GB/s PF: 162.0000 (63.4649k/fault)
+avg: 1.331197ms 7.365573GB/s PF: 161.0000 (63.8591k/fault)
+
+--- Testing direct reading + MAP_POPULATE + huge pages ---
+
+min: 1.579272ms 6.208578GB/s PF: 6.0000 (1713.5532k/fault)
+max: 5.179668ms 1.892984GB/s PF: 6.0000 (1713.5532k/fault)
+avg: 1.884944ms 5.201762GB/s PF: 6.0000 (1713.5532k/fault)
 ```
 
 ## Installation

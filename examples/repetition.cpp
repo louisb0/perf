@@ -1,33 +1,13 @@
 #include "../perf.hpp"
 
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
-
-std::string read_iterator_reserved(const fs::path &path) {
-    std::ifstream file(path);
-    std::string str;
-
-    file.seekg(0, std::ios::end);
-    str.reserve(file.tellg());
-    file.seekg(0, std::ios::beg);
-
-    str.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-    return str;
-}
-
-std::string read_stringstream(const fs::path &path) {
-    std::ifstream file(path);
-    std::stringstream buffer;
-
-    buffer << file.rdbuf();
-
-    return buffer.str();
-}
 
 std::string read_direct(const fs::path &path) {
     std::ifstream file(path, std::ios::binary);
@@ -42,52 +22,114 @@ std::string read_direct(const fs::path &path) {
     return str;
 }
 
+std::string read_direct_large_pages(const fs::path &path) {
+    std::ifstream file(path, std::ios::binary);
+    size_t file_size = fs::file_size(path);
+
+    const size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
+    size_t aligned_size = (file_size + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+
+    void *addr = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_HUGETLB | MAP_ANONYMOUS, -1, 0);
+
+    file.read(static_cast<char *>(addr), file_size);
+
+    std::string str(static_cast<char *>(addr), file_size);
+    munmap(addr, aligned_size);
+    return str;
+}
+
+std::string read_direct_map_populate(const fs::path &path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    size_t file_size = fs::file_size(path);
+
+    void *addr = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+
+    std::string str(static_cast<char *>(addr), file_size);
+    munmap(addr, file_size);
+    close(fd);
+    return str;
+}
+
+std::string read_direct_map_populate_huge_pages(const fs::path &path) {
+    std::ifstream file(path, std::ios::binary);
+    size_t file_size = fs::file_size(path);
+
+    const size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
+    size_t aligned_size = (file_size + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+
+    void *addr = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_HUGETLB | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+
+    file.read(static_cast<char *>(addr), file_size);
+
+    std::string str(static_cast<char *>(addr), file_size);
+    munmap(addr, aligned_size);
+    return str;
+}
+
 void test_file_reads(const fs::path &path) {
-    uintmax_t file_size = fs::file_size(path);
-
-    {
-        printf("\n--- Testing reserved string iterator-based reading ---\n");
-        perf::repetition::tester tester;
-        tester.start_test_wave(file_size, 10);
-
-        while (tester.is_testing()) {
-            tester.begin_time();
-            std::string result = read_iterator_reserved(path);
-            tester.end_time();
-
-            if (result.size() == file_size) {
-                tester.count_bytes(result.size());
-            }
-        }
-    }
-
-    {
-        printf("\n--- Testing stringstream reading ---\n");
-        perf::repetition::tester tester;
-        tester.start_test_wave(file_size, 10);
-
-        while (tester.is_testing()) {
-            tester.begin_time();
-            std::string result = read_stringstream(path);
-            tester.end_time();
-
-            if (result.size() == file_size) {
-                tester.count_bytes(result.size());
-            }
-        }
-    }
+    uintmax_t size = fs::file_size(path);
 
     {
         printf("\n--- Testing direct reading ---\n");
         perf::repetition::tester tester;
-        tester.start_test_wave(file_size, 10);
+        tester.start_test_wave(size, 10);
 
         while (tester.is_testing()) {
             tester.begin_time();
             std::string result = read_direct(path);
             tester.end_time();
 
-            if (result.size() == file_size) {
+            if (result.size() == size) {
+                tester.count_bytes(result.size());
+            }
+        }
+    }
+
+    {
+        printf("\n--- Testing direct reading + huge pages ---\n");
+        perf::repetition::tester tester;
+        tester.start_test_wave(size, 10);
+
+        while (tester.is_testing()) {
+            tester.begin_time();
+            std::string result = read_direct_large_pages(path);
+            tester.end_time();
+
+            if (result.size() == size) {
+                tester.count_bytes(result.size());
+            }
+        }
+    }
+
+    {
+        printf("\n--- Testing direct reading + MAP_POPULATE ---\n");
+        perf::repetition::tester tester;
+        tester.start_test_wave(size, 10);
+
+        while (tester.is_testing()) {
+            tester.begin_time();
+            std::string result = read_direct_map_populate(path);
+            tester.end_time();
+
+            if (result.size() == size) {
+                tester.count_bytes(result.size());
+            }
+        }
+    }
+
+    {
+        printf("\n--- Testing direct reading + MAP_POPULATE + huge pages ---\n");
+        perf::repetition::tester tester;
+        tester.start_test_wave(size, 10);
+
+        while (tester.is_testing()) {
+            tester.begin_time();
+            std::string result = read_direct_map_populate_huge_pages(path);
+            tester.end_time();
+
+            if (result.size() == size) {
                 tester.count_bytes(result.size());
             }
         }
